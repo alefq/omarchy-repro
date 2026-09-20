@@ -1,0 +1,43 @@
+---
+- name: Apagar VM si existe
+  ansible.builtin.command:
+    argv: [virsh, --connect, "{{ libvirt_uri }}", destroy, "{{ vm_name }}"]
+  register: virsh_destroy
+  failed_when: false
+  changed_when: virsh_destroy.rc == 0
+
+- name: Undefine VM (UEFI nvram + discos)
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ libvirt_uri }}"
+      - undefine
+      - "{{ vm_name }}"
+      - --nvram
+      - --remove-all-storage
+  register: virsh_undefine
+  failed_when: false
+  changed_when: virsh_undefine.rc == 0
+
+- name: Undefine VM (sin storage, por si el anterior falló)
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ libvirt_uri }}"
+      - undefine
+      - "{{ vm_name }}"
+      - --nvram
+  register: virsh_undefine_nvram
+  failed_when: false
+  changed_when: virsh_undefine_nvram.rc == 0
+
+- name: Borrar disco y directorio de la VM
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vm_disk_path }}"
+    - "{{ vm_raw_path }}"
+    - "{{ vm_dir }}"
