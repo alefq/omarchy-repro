@@ -1,2 +1,7 @@
 *.retry
 .run/
+*.qcow2
+*.raw
+*.iso
+*.ppm
+*.png

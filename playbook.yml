@@ -1,9 +1,8 @@
 ---
-# Ambiente efímero: por defecto levanta la VM. Para tirarla:
+# Ephemeral VM. Default: bring it up. Tear it down with:
 #   ansible-playbook playbook.yml --tags down
-# No usa become en ningún task: corre como el usuario invocante, que debe
-# estar en los grupos libvirt y kvm (ver README).
-- name: VM KVM efímera para el bug ESP de Omarchy
+# Runs as the invoking user. Checks tools on PATH, not package names.
+- name: Ephemeral KVM VM for the Omarchy ESP bug
   hosts: localhost
   connection: local
   gather_facts: false
@@ -11,61 +10,70 @@
     - vars.yml
 
   tasks:
-    - name: Comprobar KVM
+    - name: Check KVM device
       ansible.builtin.stat:
         path: /dev/kvm
       register: kvm_dev
       tags: [check]
 
-    - name: Fallar si no hay /dev/kvm
+    - name: Fail if /dev/kvm is missing
       ansible.builtin.fail:
         msg: >-
-          No existe /dev/kvm. Activá SVM/AMD-V en la BIOS, recargá kvm_amd
-          y comprobá con: kvm-ok
+          /dev/kvm does not exist. Enable virtualization in firmware
+          (SVM or VT-x) and load kvm_amd or kvm_intel.
+          The playbook does not install or configure the host.
       when: not kvm_dev.stat.exists
       tags: [check]
 
-    - name: Acceso a /dev/kvm
-      ansible.builtin.command:
-        argv: [test, -r, /dev/kvm, -a, -w, /dev/kvm]
-      register: kvm_rw
-      failed_when: false
-      changed_when: false
-      tags: [check]
-
-    - name: Fallar si /dev/kvm no es accesible
+    - name: Fail if /dev/kvm is not accessible
       ansible.builtin.fail:
         msg: |
-          /dev/kvm existe pero este usuario no puede leerlo/escribirlo.
-          El playbook no corre sudo. En el host, una vez:
-
-            sudo usermod -aG kvm "$USER"
-          Cerrá sesión y volvé a entrar.
-      when: kvm_dev.stat.exists and kvm_rw.rc != 0
-      tags: [check]
-
-    - name: Grupos libvirt y kvm
-      ansible.builtin.command:
-        argv: [id, -nG]
-      register: user_groups
-      changed_when: false
-      tags: [check]
-
-    - name: Fallar si faltan grupos
-      ansible.builtin.fail:
-        msg: |
-          Este usuario no está en kvm y/o libvirt (grupos: {{ user_groups.stdout }}).
-          Hace falta para qemu:///system y /dev/kvm.
-          El playbook no corre sudo. En el host, una vez:
-
-            sudo usermod -aG libvirt,kvm "$USER"
-          Cerrá sesión y volvé a entrar.
+          /dev/kvm exists but this user cannot read/write it.
+          This user must be allowed to use KVM (group kvm, qemu, or
+          whatever the distro assigns to that node). Reload groups /
+          session after adding the user. Ubuntu: RUN-UBUNTU.md
       when: >-
-        ('kvm' not in user_groups.stdout.split()) or
-        ('libvirt' not in user_groups.stdout.split())
+        kvm_dev.stat.exists
+        and (not kvm_dev.stat.readable or not kvm_dev.stat.writeable)
       tags: [check]
 
-    - name: Paths del disco e ISO transitables por libvirt-qemu
+    - name: Commands on PATH
+      ansible.builtin.shell:
+        cmd: command -v "{{ item }}"
+        executable: /bin/bash
+      loop: "{{ required_commands }}"
+      register: cmd_check
+      changed_when: false
+      failed_when: false
+      tags: [check]
+
+    - name: Fail if commands are missing
+      ansible.builtin.fail:
+        msg: |
+          Missing commands: {{ missing_commands | join(' ') }}
+          The playbook does not install packages; names differ by distro.
+          Ubuntu (verified run): RUN-UBUNTU.md
+      when: missing_commands | length > 0
+      vars:
+        missing_commands: "{{ cmd_check.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+      tags: [check]
+
+    - name: UEFI firmware (OVMF / edk2)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ ovmf_candidates }}"
+      register: ovmf_files
+      tags: [check]
+
+    - name: Fail if UEFI firmware is missing
+      ansible.builtin.fail:
+        msg: |
+          No UEFI firmware (OVMF / edk2) found on the known paths.
+          The playbook does not install packages. Ubuntu: RUN-UBUNTU.md (ovmf).
+      when: ovmf_files.results | map(attribute='stat') | selectattr('exists') | list | length == 0
+      tags: [check]
+
+    - name: Disk and ISO paths traversable by libvirt qemu
       ansible.builtin.shell: |
         set -euo pipefail
         blocked=""
@@ -102,56 +110,29 @@
       changed_when: false
       tags: [check]
 
-    - name: Fallar si qemu no puede transitar disco o ISO
+    - name: Fail if qemu cannot traverse the disk or ISO
       ansible.builtin.fail:
         msg: |
-          qemu:///system corre como libvirt-qemu y no puede usar:
+          qemu for {{ libvirt_uri }} cannot use:
             {{ qemu_traverse.stdout | trim }}
-          No aflojes $HOME. Disco e ISO tienen que vivir fuera
-          (default: /var/tmp). Un symlink al home no alcanza.
-
-            mkdir -p /var/tmp/omarchy-repro
-            cp --reflink=auto "{{ omarchy_iso }}" /var/tmp/omarchy.iso
-            chmod 0644 /var/tmp/omarchy.iso
-
-          Después: -e omarchy_iso=/var/tmp/omarchy.iso
-          (vm_dir ya default a /var/tmp/omarchy-repro).
+          Disk and ISO must live on a path traversable by others
+          (defaults {{ vm_dir }} / {{ omarchy_iso }}). A symlink into a
+          0700 home directory is not enough. The playbook does not
+          change $HOME permissions.
       when: qemu_traverse.rc != 0
       tags: [check]
 
-    - name: Validar disco vs. mínimo de Omarchy
+    - name: Validate disk against Omarchy minimum
       ansible.builtin.assert:
         that:
           - (vm_disk_gib | int) >= 70
         fail_msg: >-
-          Omarchy pide ≥32 G de free space. Con backup al 50%, 64 G queda
-          justo en el límite y puede rechazarlo. Usá ≥70 G (recomendado 80).
-          Pasá -e vm_disk_gib=80.
+          Omarchy requires at least 32 GiB of free space. With a 50/50
+          backup split, 64 GiB is exactly on the limit and may be rejected.
+          Use at least 70 GiB (80 recommended). Pass -e vm_disk_gib=80.
       tags: [check]
 
-    - name: Inventario de paquetes
-      ansible.builtin.package_facts:
-        manager: auto
-      tags: [check]
-
-    - name: Paquetes faltantes
-      ansible.builtin.set_fact:
-        missing_packages: "{{ host_packages | reject('in', ansible_facts.packages) | list }}"
-      tags: [check]
-
-    - name: Fallar si faltan paquetes
-      ansible.builtin.fail:
-        msg: |
-          Faltan paquetes: {{ missing_packages | join(' ') }}
-
-          El playbook no instala nada. En el host:
-
-            sudo apt update
-            sudo apt install -y {{ missing_packages | join(' ') }}
-      when: missing_packages | length > 0
-      tags: [check]
-
-    - name: libvirt responde
+    - name: libvirt responds
       ansible.builtin.command:
         argv: [virsh, --connect, "{{ libvirt_uri }}", uri]
       register: virsh_uri
@@ -159,21 +140,16 @@
       failed_when: false
       tags: [check]
 
-    - name: Fallar si libvirt no está activo
+    - name: Fail if libvirt is not running
       ansible.builtin.fail:
         msg: |
-          virsh no habla con {{ libvirt_uri }} (rc={{ virsh_uri.rc }}).
-          El playbook no arranca el daemon. En el host:
-
-            sudo systemctl start libvirtd
-
-          Si el host usa daemons modulares (virtqemud):
-
-            sudo systemctl start virtqemud.socket virtnetworkd.socket
+          virsh cannot talk to {{ libvirt_uri }} (rc={{ virsh_uri.rc }}).
+          The playbook does not start the daemon. Start libvirt the way
+          your distro expects (libvirtd or virtqemud). Ubuntu: RUN-UBUNTU.md
       when: virsh_uri.rc != 0
       tags: [check]
 
-    - name: Red libvirt activa
+    - name: libvirt network is active
       ansible.builtin.command:
         argv: [virsh, --connect, "{{ libvirt_uri }}", net-info, "{{ vm_network }}"]
       register: net_default
@@ -181,46 +157,41 @@
       changed_when: false
       tags: [check]
 
-    - name: Fallar si la red libvirt no está activa
+    - name: Fail if the libvirt network is not active
       ansible.builtin.fail:
         msg: |
-          La red libvirt '{{ vm_network }}' no está definida o no está activa.
-          El playbook no la arranca. En el host:
+          libvirt network '{{ vm_network }}' is missing or inactive.
+          The playbook does not start it. On the host (not via this playbook):
 
-            sudo virsh --connect {{ libvirt_uri }} net-start {{ vm_network }}
-
-          Si no existe:
-
-            sudo virsh --connect {{ libvirt_uri }} net-define /usr/share/libvirt/networks/default.xml
-            sudo virsh --connect {{ libvirt_uri }} net-start {{ vm_network }}
+            virsh --connect {{ libvirt_uri }} net-start {{ vm_network }}
       when: net_default.rc != 0 or not (net_default.stdout is search("Active:\\s+yes"))
       tags: [check]
 
-    - name: ISO presente
+    - name: ISO is present
       ansible.builtin.stat:
         path: "{{ omarchy_iso }}"
       register: iso
       tags: [check]
 
-    - name: Fallar si falta la ISO
+    - name: Fail if the ISO is missing
       ansible.builtin.fail:
         msg: >-
-          No está la ISO en {{ omarchy_iso }}.
-          Pasá -e omarchy_iso=/ruta/omarchy.iso
-          (https://iso.omarchy.org/omarchy-4.0.4.iso).
+          ISO not found at {{ omarchy_iso }}.
+          Pass -e omarchy_iso=/path/to/omarchy.iso
+          (https://iso.omarchy.org/).
       when: not iso.stat.exists
       tags: [check]
 
-    - name: Tirar leftover de una corrida anterior
+    - name: Tear down leftovers from a previous run
       ansible.builtin.include_tasks: tasks/teardown.yml
 
-    - name: Directorio de imágenes de esta VM
+    - name: VM image directory
       ansible.builtin.file:
         path: "{{ vm_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Disco raw sparse
+    - name: Sparse raw disk
       ansible.builtin.command:
         argv:
           - qemu-img
@@ -232,7 +203,7 @@
       args:
         creates: "{{ vm_raw_path }}"
 
-    - name: Particionar 50% libre + ext4 backup (sin ESP, sin root)
+    - name: Partition 50% free + ext4 backup (no ESP, no root)
       ansible.builtin.shell: |
         set -euo pipefail
         RAW="{{ vm_raw_path }}"
@@ -254,7 +225,7 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Definir e iniciar VM
+    - name: Define and start the VM
       ansible.builtin.command:
         argv: "{{ virt_install_base + (['--transient'] if vm_transient | bool else []) }}"
       vars:
@@ -279,7 +250,7 @@
           - --cdrom
           - "{{ omarchy_iso }}"
           - --os-variant
-          - archlinux
+          - generic
           - --network
           - "network={{ vm_network }},model=virtio"
           - --graphics
@@ -295,18 +266,18 @@
           - all=off
       register: virt_install
 
-    - name: Recordatorio
+    - name: Reminder
       ansible.builtin.debug:
         msg:
-          - "VM {{ vm_name }} levantada ({{ 'transiente' if vm_transient | bool else 'persistente' }})."
-          - "Consola: virt-viewer --connect {{ libvirt_uri }} {{ vm_name }}"
-          - "Disco vda = {{ vm_disk_gib }} G, 50% libre + ext4 backup. Sin ESP."
-          - "En el instalador: disco vda → Free space install (no wipe)."
-          - "El fallo es inmediato (parted + mkfs + mount ESP), no la copia del ISO."
-          - "Error esperado: mounting the ESP failed / SQUASHFS superblock."
-          - "Borrar todo: ansible-playbook playbook.yml --tags down"
+          - "VM {{ vm_name }} is up ({{ 'transient' if vm_transient | bool else 'persistent' }})."
+          - "Console: virt-viewer --connect {{ libvirt_uri }} {{ vm_name }}"
+          - "Disk vda = {{ vm_disk_gib }} GiB, 50% free + ext4 backup. No ESP."
+          - "In the installer: disk vda → Free space install (do not wipe)."
+          - "The failure is immediate (parted + mkfs + ESP mount), not an ISO copy."
+          - "Expected error: mounting the ESP failed / SQUASHFS superblock."
+          - "Tear down: ansible-playbook playbook.yml --tags down"
 
-- name: Tirar la VM y el disco
+- name: Destroy the VM and disk
   hosts: localhost
   connection: local
   gather_facts: false
@@ -317,6 +288,6 @@
     - name: Teardown
       ansible.builtin.include_tasks: tasks/teardown.yml
 
-    - name: Listo
+    - name: Done
       ansible.builtin.debug:
-        msg: "VM {{ vm_name }} y {{ vm_dir }} borrados."
+        msg: "VM {{ vm_name }} and {{ vm_dir }} removed."

@@ -1,111 +1,88 @@
-# Reproducir el fallo ESP de Omarchy (free space + partición de datos)
+# Repro: Omarchy free-space install fails to mount the ESP
 
-Ambiente **efímero**: una VM KVM/libvirt que se tira con `down`. No queda dominio, ni NVRAM UEFI, ni disco.
+Ephemeral KVM/libvirt VM. `down` removes the domain, UEFI NVRAM, and disk.
 
-El instalador de Omarchy 4.x, en **Free space install**, falla al montar la partición EFI (ESP, *EFI System Partition*) si el disco destino ya tiene una partición de datos y **no** hay un ESP FAT32 en ese mismo disco:
+Omarchy 4.x **Free space install** fails to mount the EFI System Partition (ESP) when the target disk already has a data partition and **no** FAT32 ESP on that disk:
 
 ```
 mount: /mnt/boot: fsconfig() failed: Can't find a SQUASHFS superblock on <part>
 mounting the ESP failed (exit 32)
 ```
 
-Es el [issue #7515](https://github.com/omacom/omarchy/issues/7515). El configurator hace `mount "$efi_dev"` sin `-t vfat`; el kernel recorre `/proc/filesystems` y en el live ISO responde primero squashfs. Workaround conocido: una EFI FAT32 dummy. Fix propuesto: [omarchy-iso#111](https://github.com/omacom/omarchy-iso/pull/111) (`mount -t vfat`).
+[Issue #7515](https://github.com/omacom/omarchy/issues/7515). The configurator runs `mount "$efi_dev"` without `-t vfat`; the kernel walks `/proc/filesystems` and on the live ISO squashfs answers first. Known workaround: a dummy FAT32 EFI partition. Proposed fix: [omarchy-iso#111](https://github.com/omacom/omarchy-iso/pull/111) (`mount -t vfat`).
 
-## Cuándo dispara (antes de copiar el sistema)
+Verified end-to-end on Ubuntu: **[RUN-UBUNTU.md](RUN-UBUNTU.md)**. Other distributions: same playbook; install equivalent tools yourself. The playbook runs as the invoking user; it does not install packages or start services.
 
-No es un fallo de copia desde el medio. En hardware real (USB 3.0, NVMe SPCC) aparece en **≤ 1 min** tras confirmar *Free space install*: no hay tiempo de volcar el ISO.
+## Host
 
-El wizard ya terminó teclado/usuario/disco. `run_partition_execute` solo hace:
+Working KVM (`/dev/kvm` readable and writable by **this** user) plus:
 
-1. `parted` — ESP 2 G + root en el hueco libre
-2. `mkfs.btrfs` + subvolúmenes + mounts de `@` `@home` `@log` `@pkg`
-3. `mkfs.fat` del ESP nuevo
-4. **`mount "$efi_dev" /mnt/boot`** — acá muere (`exit 32`, SQUASHFS)
+| Command | Role |
+|---------|------|
+| `ansible-playbook` | runner (`ansible-core`) |
+| `qemu-img` | sparse disk |
+| `virt-install`, `virsh` | libvirt `qemu:///system` |
+| `virt-viewer` | console |
+| `parted`, `mkfs.ext4` | GPT + ext4 `backup` without root |
+| OVMF/edk2 firmware | UEFI, Secure Boot off |
 
-La UI suele quedar en *Creating Btrfs filesystem and subvolumes*: ese `step` cubre 2–4. `archinstall` / pacstrap **no arrancan**; el JSON de instalación protegida se escribe *después* de ese `mount`. Al fallar, `rollback_created_parts` deshace las particiones nuevas: el disco vuelve a verse como al inicio (datos + hueco libre).
+Package **names** differ (Debian/Ubuntu `qemu-system-x86` + `ovmf`; Fedora/RHEL `qemu-kvm` + `edk2-ovmf`; Arch `qemu-desktop` + `edk2-ovmf`). The playbook checks binaries and firmware paths, not package-manager names.
 
-USB 3.0 vs USB 2.0 no cambia el resultado: el live ya está en RAM y el squashfs del ISO es justo el tipo que el `mount` sin `-t` prueba primero.
+ISO (Omarchy 4.x): https://iso.omarchy.org/ — not downloaded by the playbook. Place it on a path the libvirt qemu user can traverse **and** read (not a `0700` home directory; a symlink into home does not help). Default: `/var/tmp/omarchy.iso`.
 
-La geometría copia el patrón del SPCC (US75): mitad libre, mitad `backup` al final. Sin ESP.
+Disk images default to `/var/tmp/omarchy-repro/` (mode `0755`).
 
-## Requisitos en el host
-
-El playbook **no pide sudo en ningún momento**: corre entero como el usuario que lo invoca (sin `become`, sin `-K`). Tampoco instala paquetes ni arranca servicios — comprueba y, si falta algo, imprime el comando. `./repro.sh check` es solo eso.
-
-Lo único que hace falta es que ese usuario ya tenga permiso para crear VMs KVM: estar en los grupos `libvirt` y `kvm` (acceso estándar de Debian/Ubuntu a `qemu:///system` vía el socket de libvirtd, sin polkit/root de por medio) y que `/dev/kvm` sea accesible.
-
-En el host, una vez (esto sí necesita sudo, pero es setup, no parte del repro):
-
-```bash
-sudo apt update
-sudo apt install -y \
-  ansible-core \
-  qemu-system-x86 qemu-utils \
-  libvirt-daemon-system libvirt-clients virtinst \
-  ovmf virt-viewer \
-  parted e2fsprogs
-sudo systemctl start libvirtd
-sudo virsh --connect qemu:///system net-start default
-sudo usermod -aG libvirt,kvm "$USER"
-# cerrá sesión y volvé a entrar para que el grupo tome efecto
-```
-
-SVM/AMD-V en BIOS (`kvm-ok` tiene que ver `/dev/kvm`). ISO de Omarchy 4.x a mano (~6 G); el playbook no la baja:
-
-https://iso.omarchy.org/omarchy-4.0.4.iso
-
-Disco e ISO van **fuera de `$HOME`**: `qemu:///system` corre como `libvirt-qemu` y no atraviesa un home `0700`/`0750`. Default: `vm_dir=/var/tmp/omarchy-repro`, ISO en `/var/tmp/omarchy.iso`. Un symlink al home no alcanza. No hace falta `chmod` del home.
-
-```bash
-cp --reflink=auto "$HOME/isos/omarchy.iso" /var/tmp/omarchy.iso
-chmod 0644 /var/tmp/omarchy.iso
-```
-
-`/var/tmp` en Debian/Ubuntu se limpia a los 30 días sin uso (`tmpfiles.d`, `q /var/tmp … 30d`). El original del ISO conviene dejarlo en otro lado y copiar a `/var/tmp` antes de cada tanda; el playbook no toca esa política.
-
-El particionado es user-space sobre un raw sparse (`parted` + `mkfs.ext4 -E offset=` → qcow2). No usa libguestfs ni NBD: no lee `/boot/vmlinuz`, no pide sudo.
-
-## Uso
-
-```bash
-cd omarchy-repro
-./repro.sh check -e omarchy_iso=/var/tmp/omarchy.iso
-./repro.sh up -e omarchy_iso=/var/tmp/omarchy.iso
-virt-viewer --connect qemu:///system omarchy-repro
-```
-
-En el instalador: disco **vda**, **Free space install**. No elijas wipe. Secure Boot ya va desactivado en OVMF (*Open Virtual Machine Firmware*). El error sale en segundos, todavía en el paso de Btrfs/ESP; no esperes la copia del sistema.
-
-Cuando termines:
-
-```bash
-./repro.sh down
-```
-
-Equivalente Ansible:
+## Run
 
 ```bash
 ansible-playbook playbook.yml -e omarchy_iso=/var/tmp/omarchy.iso
+virt-viewer --connect qemu:///system omarchy-repro
+```
+
+Or `./repro.sh check|up|down|status`.
+
+In the installer (manual; an unattended `cidata` drive skips the configurator and **misses** the bug):
+
+1. Press Enter at the boot menu  
+2. Keyboard layout  
+3. Any username and password  
+4. Disk **vda** → **Free space install** (not a full wipe)  
+5. Confirm  
+
+The failure is immediate (seconds), still on *Creating Btrfs filesystem and subvolumes*. The installer is **not** copying the system.
+
+If the guest clipboard cannot copy text:
+
+```bash
+virsh --connect qemu:///system screenshot omarchy-repro /var/tmp/omarchy-esp-fail.ppm
+```
+
+Tear down:
+
+```bash
 ansible-playbook playbook.yml --tags down
 ```
 
-`up` destruye leftover de una corrida anterior y recrea el disco. `--transient` (por defecto) undefine la VM al apagarla; `down` borra igual el qcow2 y el NVRAM.
+## When it fires
 
-## Geometría de vda
+After the wizard, `run_partition_execute`:
 
-Disco de **80 G** (mínimo usable: 70 G). Omarchy exige ≥32 G de free space, más 2 G para el ESP que el instalador quiere crear. Con 64 G al 50/50 el hueco queda justo en 32 G, sin colchón.
+1. `parted` — 2 GiB ESP + root in free space  
+2. `mkfs.btrfs` + `@` `@home` `@log` `@pkg`  
+3. `mkfs.fat` on the new ESP  
+4. **`mount "$efi_dev" /mnt/boot`** — fails here (`exit 32`, SQUASHFS)  
 
-| Rango | Contenido |
-|-------|-----------|
-| 0–50% | Free space (~40 G) |
+`archinstall` / pacstrap never start. Rollback deletes the new partitions; the disk looks unchanged (data partition and unallocated space).
+
+## vda geometry
+
+**80 GiB** (usable minimum 70 GiB). Omarchy requires at least 32 GiB of free space plus 2 GiB for the ESP it tries to create. 64 GiB at 50/50 is exactly 32 GiB, with no margin.
+
+| Range | Contents |
+|-------|----------|
+| 0–50% | Free space (~40 GiB) |
 | 50–100% | ext4 `backup` |
 
-Un disco de 32 G con 50% libre (~16 G) **no** dispara el bug: el configurator aborta antes por espacio.
+A 32 GiB disk with 50% free (~16 GiB) never hits the bug: the configurator aborts on space first.
 
-Red NAT: `vm_network` (default `default`). URI: `libvirt_uri` (`qemu:///system`).
-
-## Qué no usar
-
-Una unidad `cidata` de instalación desatendida **salta el configurator**. El fallo está en `run_partition_execute` del wizard interactivo; el autoinstall no lo recorre.
-
-Para inspeccionar la VM después de un reboot del guest, pasá `-e vm_transient=false`.
+NAT network: `vm_network` (default `default`). URI: `libvirt_uri` (`qemu:///system`). Pass `-e vm_transient=false` only if you need the domain after a guest reboot.

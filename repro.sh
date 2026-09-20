@@ -4,18 +4,18 @@ cd "$(dirname "$0")"
 
 usage() {
   cat <<'EOF'
-Uso: ./repro.sh check|up|down|status [-- extra-ansible...]
+Usage: ./repro.sh check|up|down|status [-- extra-ansible...]
 
-No pide sudo: corre entero como el usuario que lo invoca. Requisito único
-en el host: ese usuario en los grupos libvirt y kvm (ver README).
+Runs as the invoking user. That user needs working KVM and the tools
+listed in the README. Ubuntu: RUN-UBUNTU.md.
 
-  check   Verifica KVM, paquetes, libvirt e ISO (no instala nada)
-  up      Verifica y levanta la VM efímera
-  down    Apaga, undefine --nvram y borra el disco
-  status  virsh list de omarchy-repro
+  check   Verify KVM, tools, libvirt, and ISO (installs nothing)
+  up      Verify and start the ephemeral VM
+  down    Power off, undefine --nvram, delete the disk
+  status  virsh list for omarchy-repro
 
-Ejemplo:
-  ./repro.sh up -e omarchy_iso=/ruta/omarchy-4.0.4.iso
+Example:
+  ./repro.sh up -e omarchy_iso=/var/tmp/omarchy.iso
   virt-viewer --connect qemu:///system omarchy-repro
   ./repro.sh down
 EOF
@@ -39,7 +39,7 @@ case "$cmd" in
     exec ansible-playbook playbook.yml --tags down "$@"
     ;;
   status)
-    virsh --connect qemu:///system list --all | grep -E 'Id|omarchy-repro' || echo "no hay VM omarchy-repro"
+    virsh --connect qemu:///system list --all | grep -E 'Id|omarchy-repro' || echo "omarchy-repro VM not found"
     ;;
   *)
     usage >&2

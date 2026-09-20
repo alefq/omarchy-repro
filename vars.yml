@@ -2,11 +2,11 @@
 vm_name: omarchy-repro
 vm_memory_mib: 8192
 vm_vcpus: 4
-# 80 G default. Piso 70: Omarchy pide ≥32 G libres y el 50/50 de 64 G queda justo, sin colchón.
+# 80 GiB default. Floor 70: Omarchy needs ≥32 GiB free; 50/50 of 64 GiB is exact, no margin.
 vm_disk_gib: 80
-# Fuera de $HOME: qemu:///system corre como libvirt-qemu y no atraviesa
-# un home 0700/0750. /var/tmp es 1777; el usuario crea vm_dir sin sudo.
-# No uses un path bajo $HOME ni un symlink que apunte adentro.
+# Keep this outside $HOME: qemu:///system runs as the libvirt qemu user
+# and cannot traverse a 0700/0750 home. /var/tmp is 1777 on most Unix systems.
+# Do not use a path under $HOME or a symlink that points into one.
 vm_dir: /var/tmp/omarchy-repro
 vm_disk_path: "{{ vm_dir }}/{{ vm_name }}.qcow2"
 vm_raw_path: "{{ vm_dir }}/{{ vm_name }}.raw"
@@ -14,13 +14,17 @@ omarchy_iso: /var/tmp/omarchy.iso
 vm_transient: true
 libvirt_uri: qemu:///system
 vm_network: default
-host_packages:
-  - qemu-system-x86
-  - qemu-utils
-  - libvirt-daemon-system
-  - libvirt-clients
-  - virtinst
-  - ovmf
+required_commands:
+  - qemu-img
+  - virt-install
+  - virsh
   - virt-viewer
   - parted
-  - e2fsprogs
+  - mkfs.ext4
+ovmf_candidates:
+  - /usr/share/OVMF/OVMF_CODE_4M.fd
+  - /usr/share/OVMF/OVMF_CODE.fd
+  - /usr/share/edk2/ovmf/OVMF_CODE.fd
+  - /usr/share/edk2-ovmf/x64/OVMF_CODE.fd
+  - /usr/share/qemu/edk2-x86_64-code.fd
+  - /usr/share/qemu/edk2-x86_64-secure-code.fd
