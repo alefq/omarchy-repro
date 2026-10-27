@@ -32,6 +32,8 @@ ISO (Omarchy 4.x): https://iso.omarchy.org/ — not downloaded by the playbook. 
 
 Disk images default to `/var/tmp/omarchy-repro/` (mode `0755`).
 
+The domain XML includes `<seclabel type='none'/>` so AppArmor/SELinux do not need a policy exception for `/var/tmp`. DAC (file mode/ownership) still applies. Pass `-e vm_seclabel=dynamic` only if the disk and ISO already live in a path `virt-aa-helper` allows (typically `/var/lib/libvirt/images`).
+
 ## Run
 
 ```bash

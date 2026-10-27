@@ -12,6 +12,7 @@ The playbook runs as the invoking user. It does not install packages, start serv
 - UEFI firmware from package `ovmf` (`/usr/share/OVMF/…`)
 - `libvirtd` running; libvirt network `default` active (`qemu:///system`)
 - Omarchy 4.x ISO at `/var/tmp/omarchy.iso`, world-readable, not under a `0700` home (a symlink into home is not enough)
+- AppArmor is expected. The playbook writes `<seclabel type='none'/>` into the domain XML so `virt-aa-helper` does not have to read `/var/tmp` (its profile typically allows `/var/lib/libvirt/images`, not `/var/tmp`). DAC still applies.
 
 On current Ubuntu, `qemu-kvm` is a **virtual package**. Use a concrete provider (`qemu-system-x86` or `qemu-system-x86-hwe`), not `qemu-kvm`.
 
@@ -91,3 +92,13 @@ ansible-playbook playbook.yml --tags down
 ```
 
 `down` deletes `/var/tmp/omarchy-repro/` (the qcow2). It does not delete the ISO.
+
+If `virsh create` fails with `cannot load AppArmor profile` even with `vm_seclabel=none`, libvirt is still loading AppArmor on this host. Once, as root:
+
+```
+# in /etc/libvirt/qemu.conf
+security_driver = "none"
+systemctl restart libvirtd
+```
+
+The playbook does not change `qemu.conf`. Do not set `vm_seclabel=dynamic` unless disk and ISO are in a path the helper already allows.

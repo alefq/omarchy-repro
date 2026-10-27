@@ -10,7 +10,15 @@ vm_disk_gib: 80
 vm_dir: /var/tmp/omarchy-repro
 vm_disk_path: "{{ vm_dir }}/{{ vm_name }}.qcow2"
 vm_raw_path: "{{ vm_dir }}/{{ vm_name }}.raw"
+vm_xml_path: "{{ vm_dir }}/{{ vm_name }}.xml"
 omarchy_iso: /var/tmp/omarchy.iso
+# qemu:///system on Ubuntu/Debian loads an AppArmor profile per domain.
+# virt-aa-helper is itself confined and typically cannot read /var/tmp
+# (it allows /var/lib/libvirt/images and often /home). type=none is
+# written into the domain XML so libvirt skips MAC for this VM; POSIX
+# DAC still applies. Override with -e vm_seclabel=dynamic only if disk
+# and ISO are in a path the helper already allows.
+vm_seclabel: none
 vm_transient: true
 libvirt_uri: qemu:///system
 vm_network: default
@@ -21,6 +29,7 @@ required_commands:
   - virt-viewer
   - parted
   - mkfs.ext4
+  - python3
 ovmf_candidates:
   - /usr/share/OVMF/OVMF_CODE_4M.fd
   - /usr/share/OVMF/OVMF_CODE.fd

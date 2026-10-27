@@ -225,11 +225,9 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Define and start the VM
+    - name: Render domain XML
       ansible.builtin.command:
-        argv: "{{ virt_install_base + (['--transient'] if vm_transient | bool else []) }}"
-      vars:
-        virt_install_base:
+        argv:
           - virt-install
           - --connect
           - "{{ libvirt_uri }}"
@@ -259,12 +257,120 @@
           - virtio
           - --boot
           - firmware=efi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no,cdrom,hd
-          - --noautoconsole
-          - --wait
-          - "0"
           - --check
           - all=off
-      register: virt_install
+          - --dry-run
+          - --print-xml
+      register: virt_xml
+      changed_when: false
+
+    - name: Write domain XML
+      ansible.builtin.copy:
+        dest: "{{ vm_xml_path }}"
+        content: "{{ virt_xml.stdout }}"
+        mode: "0644"
+
+    - name: Set domain seclabel
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - "{{ vm_xml_path }}" "{{ vm_seclabel }}" <<'PY'
+        import re
+        import sys
+
+        path, seclabel = sys.argv[1], sys.argv[2]
+        text = open(path, encoding="utf-8").read()
+        match = re.search(r"<domain\b[\s\S]*?</domain>", text)
+        if not match:
+            sys.stderr.write("virt-install --print-xml produced no <domain>\n")
+            sys.exit(1)
+        xml = match.group(0)
+        xml = re.sub(r"\s*<seclabel\b[^>]*(?:/>|>[\s\S]*?</seclabel>)", "", xml)
+        if seclabel:
+            xml = re.sub(
+                r"</domain>\s*$",
+                '  <seclabel type="%s"/>\n</domain>\n' % seclabel,
+                xml,
+            )
+        open(path, "w", encoding="utf-8").write(xml)
+        PY
+      args:
+        executable: /bin/bash
+
+    - name: Create the transient VM
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - create
+          - "{{ vm_xml_path }}"
+      register: virsh_create
+      failed_when: false
+      changed_when: virsh_create.rc == 0
+      when: vm_transient | bool
+
+    - name: Define the persistent VM
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - define
+          - "{{ vm_xml_path }}"
+      register: virsh_define
+      failed_when: false
+      changed_when: virsh_define.rc == 0
+      when: not (vm_transient | bool)
+
+    - name: Start the persistent VM
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - start
+          - "{{ vm_name }}"
+      register: virsh_start
+      failed_when: false
+      changed_when: virsh_start.rc == 0
+      when: not (vm_transient | bool)
+
+    - name: Fail if AppArmor blocked the VM
+      ansible.builtin.fail:
+        msg: |
+          libvirt could not load an AppArmor profile for this domain.
+          qemu:///system confines each VM; virt-aa-helper typically cannot
+          read {{ vm_dir }} / {{ omarchy_iso }} (it allows
+          /var/lib/libvirt/images, not /var/tmp).
+          The domain XML already has <seclabel type='{{ vm_seclabel }}'/>.
+          If that is none and this still failed, the host requires (once):
+
+            # in /etc/libvirt/qemu.conf
+            security_driver = "none"
+            sudo systemctl restart libvirtd
+
+          The playbook does not change qemu.conf. Pass -e vm_seclabel=none,
+          or put the disk and ISO in a path the helper already allows.
+      when: >-
+        (vm_transient | bool and virsh_create.rc | default(0) != 0
+         and (virsh_create.stderr | default('') is search("cannot load AppArmor profile")))
+        or
+        (not (vm_transient | bool) and
+         ((virsh_define.rc | default(0) != 0 and (virsh_define.stderr | default('') is search("cannot load AppArmor profile")))
+          or (virsh_start.rc | default(0) != 0 and (virsh_start.stderr | default('') is search("cannot load AppArmor profile")))))
+
+    - name: Fail if the VM did not start
+      ansible.builtin.fail:
+        msg: |
+          virsh failed to start {{ vm_name }} (transient={{ vm_transient }}).
+          {{ virsh_create.stderr | default('') }}
+          {{ virsh_define.stderr | default('') }}
+          {{ virsh_start.stderr | default('') }}
+      when: >-
+        (vm_transient | bool and virsh_create.rc | default(0) != 0)
+        or
+        (not (vm_transient | bool)
+         and (virsh_define.rc | default(0) != 0 or virsh_start.rc | default(0) != 0))
 
     - name: Reminder
       ansible.builtin.debug:
