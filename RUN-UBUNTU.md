@@ -8,7 +8,7 @@ The playbook runs as the invoking user. It does not install packages, start serv
 
 - `/dev/kvm` present; this user can read and write it
 - Groups `kvm` and `libvirt` on this user (reload the login session after changing them)
-- Commands on `PATH`: `ansible-playbook`, `qemu-img`, `virt-install`, `virsh`, `virt-viewer`, `parted`, `mkfs.ext4`
+- Commands on `PATH`: `ansible-playbook`, `qemu-img`, `virt-install`, `virsh`, `virt-viewer`, `parted`, `mkfs.ext4`, `python3`
 - UEFI firmware from package `ovmf` (`/usr/share/OVMF/…`)
 - `libvirtd` running; libvirt network `default` active (`qemu:///system`)
 - Omarchy 4.x ISO at `/var/tmp/omarchy.iso`, world-readable, not under a `0700` home (a symlink into home is not enough)
@@ -93,7 +93,7 @@ ansible-playbook playbook.yml --tags down
 
 `down` deletes `/var/tmp/omarchy-repro/` (the qcow2). It does not delete the ISO.
 
-If `virsh create` fails with `cannot load AppArmor profile` even with `vm_seclabel=none`, libvirt is still loading AppArmor on this host. Once, as root:
+If `virsh start` fails with `cannot load AppArmor profile` even with `vm_seclabel=none`, libvirt is still loading AppArmor on this host. Once, as root:
 
 ```
 # in /etc/libvirt/qemu.conf

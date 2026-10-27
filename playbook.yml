@@ -225,6 +225,7 @@
         executable: /bin/bash
       changed_when: true
 
+    # EFI NVRAM is not usable with virsh create (transient). Define + start.
     - name: Render domain XML
       ansible.builtin.command:
         argv:
@@ -257,10 +258,18 @@
           - virtio
           - --boot
           - firmware=efi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no,cdrom,hd
+          - --events
+          - "{{ virt_events }}"
+          - --noreboot
           - --check
           - all=off
           - --dry-run
           - --print-xml
+      vars:
+        virt_events: >-
+          {{ 'on_poweroff=destroy,on_reboot=destroy,on_crash=destroy'
+             if vm_transient | bool else
+             'on_poweroff=destroy,on_reboot=restart,on_crash=destroy' }}
       register: virt_xml
       changed_when: false
 
@@ -296,20 +305,7 @@
       args:
         executable: /bin/bash
 
-    - name: Create the transient VM
-      ansible.builtin.command:
-        argv:
-          - virsh
-          - --connect
-          - "{{ libvirt_uri }}"
-          - create
-          - "{{ vm_xml_path }}"
-      register: virsh_create
-      failed_when: false
-      changed_when: virsh_create.rc == 0
-      when: vm_transient | bool
-
-    - name: Define the persistent VM
+    - name: Define the VM
       ansible.builtin.command:
         argv:
           - virsh
@@ -320,9 +316,15 @@
       register: virsh_define
       failed_when: false
       changed_when: virsh_define.rc == 0
-      when: not (vm_transient | bool)
 
-    - name: Start the persistent VM
+    - name: Fail if virsh define failed
+      ansible.builtin.fail:
+        msg: |
+          virsh define failed (rc={{ virsh_define.rc }}).
+          {{ virsh_define.stderr }}
+      when: virsh_define.rc != 0
+
+    - name: Start the VM
       ansible.builtin.command:
         argv:
           - virsh
@@ -333,9 +335,8 @@
       register: virsh_start
       failed_when: false
       changed_when: virsh_start.rc == 0
-      when: not (vm_transient | bool)
 
-    - name: Fail if AppArmor blocked the VM
+    - name: Fail if AppArmor blocked start
       ansible.builtin.fail:
         msg: |
           libvirt could not load an AppArmor profile for this domain.
@@ -352,31 +353,41 @@
           The playbook does not change qemu.conf. Pass -e vm_seclabel=none,
           or put the disk and ISO in a path the helper already allows.
       when: >-
-        (vm_transient | bool and virsh_create.rc | default(0) != 0
-         and (virsh_create.stderr | default('') is search("cannot load AppArmor profile")))
-        or
-        (not (vm_transient | bool) and
-         ((virsh_define.rc | default(0) != 0 and (virsh_define.stderr | default('') is search("cannot load AppArmor profile")))
-          or (virsh_start.rc | default(0) != 0 and (virsh_start.stderr | default('') is search("cannot load AppArmor profile")))))
+        virsh_start.rc != 0
+        and (virsh_start.stderr is search("cannot load AppArmor profile"))
 
-    - name: Fail if the VM did not start
+    - name: Fail if virsh start failed
       ansible.builtin.fail:
         msg: |
-          virsh failed to start {{ vm_name }} (transient={{ vm_transient }}).
-          {{ virsh_create.stderr | default('') }}
-          {{ virsh_define.stderr | default('') }}
-          {{ virsh_start.stderr | default('') }}
-      when: >-
-        (vm_transient | bool and virsh_create.rc | default(0) != 0)
-        or
-        (not (vm_transient | bool)
-         and (virsh_define.rc | default(0) != 0 or virsh_start.rc | default(0) != 0))
+          virsh start failed (rc={{ virsh_start.rc }}).
+          {{ virsh_start.stderr }}
+      when: virsh_start.rc != 0
+
+    - name: Domain state
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ libvirt_uri }}"
+          - domstate
+          - "{{ vm_name }}"
+      register: domstate
+      changed_when: false
+
+    - name: Fail if the domain is not running
+      ansible.builtin.fail:
+        msg: |
+          Domain {{ vm_name }} is '{{ domstate.stdout | trim }}', expected running.
+          URI: {{ libvirt_uri }}
+          Check: virsh --connect {{ libvirt_uri }} list --all
+      when: (domstate.stdout | trim) != "running"
 
     - name: Reminder
       ansible.builtin.debug:
         msg:
-          - "VM {{ vm_name }} is up ({{ 'transient' if vm_transient | bool else 'persistent' }})."
+          - "VM {{ vm_name }} is running ({{ libvirt_uri }}, state={{ domstate.stdout | trim }})."
           - "Console: virt-viewer --connect {{ libvirt_uri }} {{ vm_name }}"
+          - "List: virsh --connect {{ libvirt_uri }} list --all"
           - "Disk vda = {{ vm_disk_gib }} GiB, 50% free + ext4 backup. No ESP."
           - "In the installer: disk vda → Free space install (do not wipe)."
           - "The failure is immediate (parted + mkfs + ESP mount), not an ISO copy."

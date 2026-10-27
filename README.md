@@ -87,4 +87,4 @@ After the wizard, `run_partition_execute`:
 
 A 32 GiB disk with 50% free (~16 GiB) never hits the bug: the configurator aborts on space first.
 
-NAT network: `vm_network` (default `default`). URI: `libvirt_uri` (`qemu:///system`). Pass `-e vm_transient=false` only if you need the domain after a guest reboot.
+NAT network: `vm_network` (default `default`). URI: `libvirt_uri` (`qemu:///system`). The domain is always `virsh define` + `virsh start` (EFI NVRAM does not work with `virsh create`). Pass `-e vm_transient=false` if the guest must survive a reboot; `down` still undefines it.

@@ -19,6 +19,9 @@ omarchy_iso: /var/tmp/omarchy.iso
 # DAC still applies. Override with -e vm_seclabel=dynamic only if disk
 # and ISO are in a path the helper already allows.
 vm_seclabel: none
+# EFI needs a defined domain (NVRAM). The VM is always virsh define + start.
+# true: destroy on guest poweroff/reboot (same idea as virt-install --transient).
+# false: guest reboot restarts the domain. down still undefines.
 vm_transient: true
 libvirt_uri: qemu:///system
 vm_network: default
